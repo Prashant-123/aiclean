@@ -1,0 +1,60 @@
+{
+  "name": "aiclean",
+  "version": "1.0.0",
+  "description": "CLI tool to scan and clean disk usage from 50+ AI & dev tools",
+  "main": "core/engine.js",
+  "bin": {
+    "aiclean": "./bin/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aiclean/aiclean.git"
+  },
+  "files": [
+    "bin/",
+    "core/",
+    "adapters/",
+    "config/",
+    "utils/",
+    "telemetry/",
+    "api/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/index.js",
+    "scan": "node bin/index.js scan",
+    "clean": "node bin/index.js clean --dry",
+    "list": "node bin/index.js list"
+  },
+  "keywords": [
+    "cli",
+    "disk",
+    "cleanup",
+    "cache",
+    "ai",
+    "claude",
+    "cursor",
+    "copilot",
+    "vscode",
+    "jetbrains",
+    "docker",
+    "npm",
+    "pip",
+    "huggingface",
+    "ollama",
+    "devtools"
+  ],
+  "author": "aiclean <hello@aiclean.tech>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "fs-extra": "^11.2.0",
+    "inquirer": "^8.2.6",
+    "ora": "^5.4.1"
+  }
+}

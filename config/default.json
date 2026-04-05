@@ -1,0 +1,21 @@
+{
+  "autoClean": false,
+  "interval": "weekly",
+  "ignoredTools": [],
+  "dryRunByDefault": false,
+  "logCleaning": true,
+  "telemetry": true,
+  "confirmBeforeClean": true,
+  "maxLogEntries": 1000,
+  "showInsights": true,
+  "categories": {
+    "ai-tools": true,
+    "editors": true,
+    "package-managers": true,
+    "languages": true,
+    "build-tools": true,
+    "cloud-devops": true,
+    "ml-frameworks": true,
+    "system": true
+  }
+}

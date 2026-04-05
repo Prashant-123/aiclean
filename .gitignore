@@ -1,0 +1,28 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.env.local
+.env.*.local
+
+# Local aiclean data (user-specific)
+.aiclean/
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+.next/
+dist/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Internal dev docs
+plan.md
