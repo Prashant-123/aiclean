@@ -1,5 +1,8 @@
 # aiclean
 
+[![npm version](https://img.shields.io/npm/v/aiclean.svg)](https://www.npmjs.com/package/aiclean)
+[![license](https://img.shields.io/npm/l/aiclean.svg)](https://github.com/Prashant-123/aiclean/blob/main/LICENSE)
+
 Reclaim disk space from **50+ AI & development tools** in one command.
 
 Every AI tool you install silently hoards gigabytes of caches, models, and temp files. aiclean finds them all — and lets you take back your storage.
@@ -140,7 +143,7 @@ We welcome contributions! Here's how to get started:
 ### Setting up the dev environment
 
 ```bash
-git clone https://github.com/aiclean/aiclean.git
+git clone https://github.com/Prashant-123/aiclean.git
 cd aiclean
 npm install
 ```
@@ -204,7 +207,7 @@ Example definition:
 
 ### Reporting bugs
 
-Open an issue at [github.com/aiclean/aiclean/issues](https://github.com/aiclean/aiclean/issues) with:
+Open an issue at [github.com/Prashant-123/aiclean/issues](https://github.com/Prashant-123/aiclean/issues) with:
 - Your OS and version
 - Node.js version (`node --version`)
 - The command you ran

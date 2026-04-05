@@ -4,11 +4,15 @@
   "description": "CLI tool to scan and clean disk usage from 50+ AI & dev tools",
   "main": "core/engine.js",
   "bin": {
-    "aiclean": "./bin/index.js"
+    "aiclean": "bin/index.js"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/aiclean/aiclean.git"
+    "url": "git+https://github.com/Prashant-123/aiclean.git"
+  },
+  "homepage": "https://aiclean.tech",
+  "bugs": {
+    "url": "https://github.com/Prashant-123/aiclean/issues"
   },
   "files": [
     "bin/",
