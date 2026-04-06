@@ -1,6 +1,6 @@
 {
   "name": "aiclean",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CLI tool to scan and clean disk usage from 50+ AI & dev tools",
   "main": "core/engine.js",
   "bin": {
