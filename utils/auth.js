@@ -10,6 +10,7 @@ const PRO_FEATURES = [
 
 /**
  * Check if the current user has Pro access.
+ * Re-verifies the license key with the server to catch expired subscriptions.
  * Returns { allowed: true } or { allowed: false, reason: string }.
  */
 async function checkPro() {
@@ -23,7 +24,10 @@ async function checkPro() {
     };
   }
 
-  if (status.plan !== 'pro') {
+  // Re-verify with the server to catch expired/cancelled subscriptions
+  const currentPlan = await apiClient.refreshPlan();
+
+  if (currentPlan !== 'pro') {
     return {
       allowed: false,
       reason: 'free_plan',
@@ -31,7 +35,7 @@ async function checkPro() {
     };
   }
 
-  return { allowed: true, email: status.email, plan: status.plan };
+  return { allowed: true, email: status.email, plan: currentPlan };
 }
 
 /**
@@ -49,9 +53,8 @@ async function requirePro(featureName) {
     console.log(chalk.red('  This feature requires a Pro subscription.'));
     console.log();
     console.log(chalk.bold('  To get started:'));
-    console.log(chalk.dim('    1. Subscribe at ') + chalk.underline('https://aiclean.tech/pricing'));
-    console.log(chalk.dim('    2. Get your API key from ') + chalk.underline('https://aiclean.tech/settings'));
-    console.log(chalk.dim('    3. Run: ') + chalk.bold('aiclean login'));
+    console.log(chalk.dim('    1. Purchase at ') + chalk.underline('https://aiclean.tech/pricing'));
+    console.log(chalk.dim('    2. Run: ') + chalk.bold('aiclean login') + chalk.dim(' with the license key from your email'));
   } else {
     // free_plan
     console.log(chalk.red(`  "${featureName}" is a Pro feature.`));

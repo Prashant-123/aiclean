@@ -66,25 +66,25 @@ async function isPro() {
   return plan === 'pro';
 }
 
-// ━━━ API KEY VALIDATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━ LICENSE KEY VALIDATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Validate API key format.
- * Expected format: ak_live_xxxxx or ak_test_xxxxx (32+ chars)
+ * Validate license key format.
+ * Accepts Lemon Squeezy license keys (UUID-like or alphanumeric, 8+ chars).
  */
-function validateKeyFormat(apiKey) {
-  if (!apiKey || typeof apiKey !== 'string') {
-    return { valid: false, reason: 'API key is required' };
+function validateKeyFormat(licenseKey) {
+  if (!licenseKey || typeof licenseKey !== 'string') {
+    return { valid: false, reason: 'License key is required' };
   }
 
-  const trimmed = apiKey.trim();
+  const trimmed = licenseKey.trim();
 
-  if (trimmed.length < 20) {
-    return { valid: false, reason: 'API key is too short' };
+  if (trimmed.length < 8) {
+    return { valid: false, reason: 'License key is too short' };
   }
 
-  if (!/^ak_(live|test)_[a-zA-Z0-9]+$/.test(trimmed)) {
-    return { valid: false, reason: 'Invalid format. Expected: ak_live_xxxxx or ak_test_xxxxx' };
+  if (!/^[A-Za-z0-9-]+$/.test(trimmed)) {
+    return { valid: false, reason: 'Invalid license key format' };
   }
 
   return { valid: true, key: trimmed };
@@ -106,12 +106,12 @@ function validateEmail(email) {
 // ━━━ LOGIN / LOGOUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Login with API key.
+ * Login with license key.
  * Verifies against the server. Falls back to local storage if server is unreachable.
  */
-async function login(apiKey, email) {
+async function login(licenseKey, email) {
   // Validate inputs
-  const keyCheck = validateKeyFormat(apiKey);
+  const keyCheck = validateKeyFormat(licenseKey);
   if (!keyCheck.valid) {
     return { success: false, message: keyCheck.reason };
   }
@@ -150,21 +150,19 @@ async function login(apiKey, email) {
     }
 
     if (response.status === 401) {
-      return { success: false, message: 'Invalid API key. Check your key at aiclean.tech/settings.' };
+      return { success: false, message: 'Invalid license key. Check the key from your purchase confirmation email.' };
     }
     if (response.status === 403) {
-      return { success: false, message: 'API key expired or revoked. Generate a new one at aiclean.tech/settings.' };
+      return { success: false, message: 'License key expired or revoked.' };
     }
 
     return { success: false, message: `Server error (${response.status}). Try again later.` };
   } catch (err) {
-    // Server unreachable — determine plan from key prefix
-    const plan = keyCheck.key.startsWith('ak_live_') ? 'pro' : 'free';
-
+    // Server unreachable — save locally for later verification
     await saveAuth({
       token: keyCheck.key,
       email: emailCheck.email,
-      plan,
+      plan: 'pro',
       validatedAt: new Date().toISOString(),
       expiresAt: null,
       source: 'offline',
@@ -172,9 +170,64 @@ async function login(apiKey, email) {
 
     return {
       success: true,
-      plan,
-      message: `Saved locally (server offline). Plan: ${plan}. Will verify on next login.`,
+      plan: 'pro',
+      message: `Saved locally (server offline). Will verify on next login.`,
     };
+  }
+}
+
+/**
+ * Re-verify the stored license key against the server.
+ * Updates the local plan if the server responds.
+ * Silently keeps the cached plan if the server is unreachable.
+ */
+async function refreshPlan() {
+  const auth = await getAuth();
+  if (!auth || !auth.token) return null;
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/auth/verify`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${auth.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email: auth.email }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const newPlan = data.plan || 'free';
+
+      // Update local auth if plan changed
+      if (newPlan !== auth.plan) {
+        await saveAuth({
+          ...auth,
+          plan: newPlan,
+          validatedAt: new Date().toISOString(),
+          source: 'server',
+        });
+      }
+      return newPlan;
+    }
+
+    if (response.status === 401) {
+      // License key is no longer valid — downgrade locally
+      await saveAuth({
+        ...auth,
+        plan: 'free',
+        validatedAt: new Date().toISOString(),
+        source: 'server',
+      });
+      return 'free';
+    }
+
+    // Server error — keep cached plan
+    return auth.plan;
+  } catch {
+    // Server unreachable — keep cached plan
+    return auth.plan;
   }
 }
 
@@ -230,6 +283,7 @@ module.exports = {
   validateEmail,
   login,
   logout,
+  refreshPlan,
   getAccountStatus,
   saveAuth,
   API_BASE_URL,

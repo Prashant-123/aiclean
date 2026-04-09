@@ -709,8 +709,8 @@ program
 
 program
   .command('login')
-  .description('Authenticate with your API key')
-  .option('--key <key>', 'API key (or enter interactively)')
+  .description('Authenticate with your license key')
+  .option('--key <key>', 'License key (or enter interactively)')
   .option('--email <email>', 'Account email')
   .action(async (options) => {
     // Check if already logged in
@@ -727,21 +727,21 @@ program
       if (!relogin) return;
     }
 
-    // Get API key
-    let apiKey = options.key;
-    if (!apiKey) {
+    // Get license key
+    let licenseKey = options.key;
+    if (!licenseKey) {
       console.log();
-      console.log(chalk.dim('  Get your API key at https://aiclean.tech/settings'));
-      console.log(chalk.dim('  Format: ak_live_xxxxx or ak_test_xxxxx'));
+      console.log(chalk.dim('  Enter the license key from your purchase confirmation email.'));
+      console.log(chalk.dim('  Purchase at https://aiclean.tech/pricing'));
       console.log();
       const answer = await inquirer.prompt([
-        { type: 'password', name: 'apiKey', message: 'API key:', mask: '*' },
+        { type: 'password', name: 'licenseKey', message: 'License key:', mask: '*' },
       ]);
-      apiKey = answer.apiKey;
+      licenseKey = answer.licenseKey;
     }
 
     // Validate key format before hitting the server
-    const keyCheck = apiClient.validateKeyFormat(apiKey);
+    const keyCheck = apiClient.validateKeyFormat(licenseKey);
     if (!keyCheck.valid) {
       console.log(chalk.red(`\n  ${keyCheck.reason}\n`));
       return;
@@ -763,8 +763,8 @@ program
     }
 
     // Authenticate
-    const spinner = ora('Verifying API key...').start();
-    const result = await apiClient.login(apiKey, email);
+    const spinner = ora('Verifying license key...').start();
+    const result = await apiClient.login(licenseKey, email);
     spinner.stop();
 
     if (result.success) {
@@ -832,8 +832,8 @@ program
       console.log(chalk.dim('  Pro features (auto-clean) require authentication.'));
       console.log();
       console.log(chalk.bold('  To upgrade:'));
-      console.log(chalk.dim('    1. Subscribe at ') + chalk.underline('https://aiclean.tech/pricing'));
-      console.log(chalk.dim('    2. Run: ') + chalk.bold('aiclean login'));
+      console.log(chalk.dim('    1. Purchase at ') + chalk.underline('https://aiclean.tech/pricing'));
+      console.log(chalk.dim('    2. Run: ') + chalk.bold('aiclean login') + chalk.dim(' with your license key'));
     } else {
       console.log(`  ${chalk.bold('Status:')}      ${chalk.green('Authenticated')}`);
       console.log(`  ${chalk.bold('Email:')}       ${status.email}`);
