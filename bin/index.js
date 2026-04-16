@@ -818,6 +818,60 @@ program
     }
   });
 
+// ━━━ JOIN COMMAND (team members) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('join')
+  .description('Join a team as a member using the code from your admin')
+  .argument('[code]', 'Member token (JWT) from your team invite')
+  .option('--code <code>', 'Alternative way to pass the code')
+  .action(async (positional, options) => {
+    // Check if already logged in
+    const existing = await apiClient.getAccountStatus();
+    if (existing.authenticated) {
+      console.log();
+      console.log(chalk.yellow(`  Already logged in as ${existing.email} (${existing.plan} plan).`));
+      const { relogin } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'relogin',
+        message: 'Replace with a team member credential?',
+        default: false,
+      }]);
+      if (!relogin) return;
+    }
+
+    let code = positional || options.code;
+    if (!code) {
+      console.log();
+      console.log(chalk.dim('  Paste the `aiclean join ...` code your admin sent you.'));
+      console.log(chalk.dim('  They get it from https://aiclean.tech/dashboard after inviting you.'));
+      console.log();
+      const answer = await inquirer.prompt([
+        { type: 'password', name: 'code', message: 'Member code:', mask: '*' },
+      ]);
+      code = answer.code;
+    }
+
+    const spinner = ora('Verifying member code...').start();
+    const result = await apiClient.joinTeam(code);
+    spinner.stop();
+
+    if (result.success) {
+      console.log();
+      console.log(chalk.green('  Joined team!'));
+      console.log();
+      console.log(`  ${chalk.bold('Email:')} ${result.email}`);
+      console.log(`  ${chalk.bold('Plan:')}  ${chalk.green('Pro (via team)')}`);
+      console.log(`  ${chalk.bold('Org:')}   ${result.orgId}`);
+      console.log();
+      console.log(chalk.dim('  Pro features unlocked: rollback, guardian, dedupe, projects,'));
+      console.log(chalk.dim('  smart rules, live registry, fleet telemetry.'));
+      console.log();
+    } else {
+      console.log(chalk.red(`\n  ${result.message}\n`));
+    }
+  });
+
 // ━━━ LOGOUT COMMAND ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 program
@@ -867,9 +921,12 @@ program
       console.log(chalk.dim('    1. Purchase at ') + chalk.underline('https://aiclean.tech/pricing'));
       console.log(chalk.dim('    2. Run: ') + chalk.bold('aiclean login') + chalk.dim(' with your license key'));
     } else {
+      const auth = await apiClient.getAuth();
+      const isMember = auth?.kind === 'member';
       console.log(`  ${chalk.bold('Status:')}      ${chalk.green('Authenticated')}`);
       console.log(`  ${chalk.bold('Email:')}       ${status.email}`);
-      console.log(`  ${chalk.bold('Plan:')}        ${status.plan === 'pro' ? chalk.green('Pro') : chalk.dim('Free')}`);
+      console.log(`  ${chalk.bold('Plan:')}        ${status.plan === 'pro' ? chalk.green('Pro') : chalk.dim('Free')}${isMember ? chalk.dim(' (via team)') : ''}`);
+      if (isMember) console.log(`  ${chalk.bold('Org:')}         ${auth.orgId}`);
       console.log(`  ${chalk.bold('Verified:')}    ${new Date(status.validatedAt).toLocaleString()}`);
       console.log(`  ${chalk.bold('Source:')}      ${status.source === 'server' ? 'Server verified' : 'Local (offline)'}`);
 

@@ -106,6 +106,64 @@ function validateEmail(email) {
 // ━━━ LOGIN / LOGOUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
+ * Join a team as a member (v2.1).
+ * Member tokens are JWTs issued by /v1/team/accept. The CLI exchanges one
+ * for local Pro credentials after validating it against /v1/team/verify.
+ */
+async function joinTeam(memberJwt) {
+  if (!memberJwt || typeof memberJwt !== 'string') {
+    return { success: false, message: 'Member token required' };
+  }
+
+  // JWTs look like header.payload.signature
+  if (!/^eyJ[\w-]+\.[\w-]+\.[\w-]+$/.test(memberJwt.trim())) {
+    return { success: false, message: 'That does not look like a member token.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/team/verify`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${memberJwt.trim()}`,
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      await saveAuth({
+        kind: 'member',
+        token: memberJwt.trim(),
+        email: data.email,
+        plan: 'pro',
+        orgId: data.orgId,
+        validatedAt: new Date().toISOString(),
+        source: 'server',
+      });
+      return {
+        success: true,
+        plan: 'pro',
+        email: data.email,
+        orgId: data.orgId,
+        message: `Joined team (${data.email}). Pro features unlocked on this machine.`,
+      };
+    }
+
+    const body = await response.json().catch(() => ({}));
+    if (response.status === 402) {
+      return { success: false, message: body.error || 'Admin subscription is not active.' };
+    }
+    if (response.status === 403) {
+      return { success: false, message: body.error || 'Membership is no longer valid.' };
+    }
+    return { success: false, message: body.error || `Server error (${response.status}).` };
+  } catch (err) {
+    return { success: false, message: `Network error: ${err.message}` };
+  }
+}
+
+/**
  * Login with license key.
  * Verifies against the server. Falls back to local storage if server is unreachable.
  */
@@ -135,6 +193,7 @@ async function login(licenseKey, email) {
     if (response.ok) {
       const data = await response.json();
       await saveAuth({
+        kind: 'owner',
         token: keyCheck.key,
         email: emailCheck.email,
         plan: data.plan || 'pro',
@@ -160,6 +219,7 @@ async function login(licenseKey, email) {
   } catch (err) {
     // Server unreachable — save locally for later verification
     await saveAuth({
+      kind: 'owner',
       token: keyCheck.key,
       email: emailCheck.email,
       plan: 'pro',
@@ -185,14 +245,18 @@ async function refreshPlan() {
   const auth = await getAuth();
   if (!auth || !auth.token) return null;
 
+  // Route verification based on credential kind.
+  const endpoint = auth.kind === 'member' ? '/team/verify' : '/auth/verify';
+  const body = auth.kind === 'member' ? null : JSON.stringify({ email: auth.email });
+
   try {
-    const response = await fetch(`${API_BASE_URL}/auth/verify`, {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${auth.token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ email: auth.email }),
+      body: body || undefined,
       signal: AbortSignal.timeout(5000),
     });
 
@@ -212,8 +276,8 @@ async function refreshPlan() {
       return newPlan;
     }
 
-    if (response.status === 401) {
-      // License key is no longer valid — downgrade locally
+    if (response.status === 401 || response.status === 402 || response.status === 403) {
+      // Credential no longer valid — downgrade locally
       await saveAuth({
         ...auth,
         plan: 'free',
@@ -282,6 +346,7 @@ module.exports = {
   validateKeyFormat,
   validateEmail,
   login,
+  joinTeam,
   logout,
   refreshPlan,
   getAccountStatus,
