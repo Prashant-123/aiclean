@@ -1,6 +1,6 @@
 {
   "name": "aiclean",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "CLI tool to scan and clean disk usage from 50+ AI & dev tools — with rollback, pre-flight disk guardian, duplicate model detection, and project-aware cleaning",
   "main": "core/engine.js",
   "bin": {
