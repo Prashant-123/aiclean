@@ -50,6 +50,15 @@ aiclean interactive
 | `aiclean auto --weekly` | Schedule auto-clean via cron (Pro) |
 | `aiclean auto --status` | Check if auto-clean is active |
 | `aiclean auto --off` | Disable auto-clean |
+| `aiclean restore --list/--last/--id` | List or roll back snapshots (Pro) |
+| `aiclean guard --install/--status/--orphans` | Pre-flight disk guardian for AI downloads (Pro, orphans is free) |
+| `aiclean dedupe [--hardlink]` | Find duplicate ML model weights across tools (Pro) |
+| `aiclean projects [--dormant 90d]` | Clean `node_modules`, `target/`, `.venv` from dormant git repos (Pro) |
+| `aiclean rules --add/--list/--test` | Smart rules engine: condition-based cleaning (Pro) |
+| `aiclean daemon install` | Install background daemon for rule evaluation (Pro) |
+| `aiclean registry refresh/status` | Fetch the live signed adapter registry (Pro) |
+| `aiclean agent enroll` | Enroll this machine with the fleet dashboard (Pro/Team) |
+| `aiclean benchmark` | Compare your disk usage against aggregated dev stats (Pro) |
 | `aiclean config` | View/update configuration |
 | `aiclean logs` | View cleaning history |
 | `aiclean stats` | View usage statistics |
@@ -126,13 +135,19 @@ Stored at `~/.aicleanrc`:
 
 ## Free vs Pro
 
-The CLI is **free and open source**. All scan, clean, interactive, and safety features work without an account.
+The CLI is **free and open source**. All scan, clean, interactive, and safety features — plus orphaned-download detection — work without an account.
 
-Pro ($5/month) adds:
-- Scheduled auto-clean (`aiclean auto --weekly`)
-- Age-based cleaning (`aiclean clean --older-than 30d`)
-- Priority support
-- Early access to new features
+Pro adds:
+
+- **Rollback / snapshots** — create a restore point before any clean (APFS / btrfs / ZFS), roll back with one command
+- **Pre-flight disk guardian** — intercept `ollama pull`, `huggingface-cli download`, `docker pull`, `pip install`, `npm install` etc. when disk is tight; auto-offer cleanup
+- **Duplicate model detection** — find duplicate ML weights across Ollama / HuggingFace / LM Studio / torch.hub and hardlink them to reclaim disk
+- **Project-aware cleaning** — reclaim `node_modules`, `target/`, `.venv` from dormant git repos across your filesystem
+- **Smart rules engine** — condition-based automation (disk %, idle time, project activity, battery, time of day)
+- **Live signed adapter registry** — daily-updated tool definitions with bloat advisories ("Cursor 0.41 moved cache", "Ollama 0.5.x leaks partial downloads — now cleaned")
+- **Fleet dashboard + benchmarks** — compare your usage against anonymized aggregates; team tier gives CTOs org-wide visibility
+- **Scheduled auto-clean + age-based filtering** — cron-style scheduling, `--older-than 30d`
+- Priority support, early access to new features
 
 Learn more at [aiclean.tech](https://aiclean.tech/pricing)
 

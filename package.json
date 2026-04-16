@@ -1,7 +1,7 @@
 {
   "name": "aiclean",
-  "version": "1.1.0",
-  "description": "CLI tool to scan and clean disk usage from 50+ AI & dev tools",
+  "version": "2.0.0",
+  "description": "CLI tool to scan and clean disk usage from 50+ AI & dev tools — with rollback, pre-flight disk guardian, duplicate model detection, and project-aware cleaning",
   "main": "core/engine.js",
   "bin": {
     "aiclean": "bin/index.js"
@@ -55,6 +55,8 @@
     "node": ">=16.0.0"
   },
   "dependencies": {
+    "@noble/ed25519": "^2.1.0",
+    "@noble/hashes": "^1.5.0",
     "chalk": "^4.1.2",
     "commander": "^11.1.0",
     "fs-extra": "^11.2.0",

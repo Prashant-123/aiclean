@@ -12,7 +12,14 @@ const logger = require('../utils/logger');
 const apiClient = require('../api/client');
 const definitions = require('../adapters/definitions');
 const safety = require('../utils/safety');
-const { requirePro } = require('../utils/auth');
+const { requirePro, PRO_FEATURES } = require('../utils/auth');
+const snapshots = require('../core/snapshots');
+const guardian = require('../core/guardian');
+const dedupe = require('../core/dedupe');
+const projects = require('../core/projects');
+const rules = require('../core/rules');
+const registryFetch = require('../core/registry-fetch');
+const reporter = require('../telemetry/reporter');
 const pkg = require('../package.json');
 
 const RISK_ICONS = {
@@ -69,6 +76,7 @@ program
   .option('--exclude <tools>', 'Exclude specific tools (comma-separated IDs)')
   .option('--risk <level>', 'Only clean tools at this risk level or below (low, medium, high)')
   .option('--older-than <duration>', 'Only clean files not accessed in the given duration (e.g. 30d, 2w, 6h)')
+  .option('--no-snapshot', 'Skip snapshot creation for Pro users (not recommended)')
   .action(async (options) => {
     await engine.init();
 
@@ -76,6 +84,7 @@ program
     const skipConfirm = options.yes || options.Y || false;
     const forceAll = options.force || false;
     const maxRisk = options.risk || 'high';
+    const wantSnapshot = options.snapshot !== false; // default ON for Pro users
 
     // Parse --older-than duration (Pro feature)
     let olderThan = null;
@@ -277,6 +286,29 @@ program
       if (toolsToClean.length === 0) {
         console.log(chalk.yellow('\n  No items selected for cleaning.\n'));
         return;
+      }
+
+      // ── Snapshot (Pro) before touching anything medium/high risk ──
+      const hasMediumOrHigh = toolsToClean.some((id) => {
+        const r = filteredResults.find((x) => x.id === id);
+        return r && (r.risk === 'medium' || r.risk === 'high');
+      });
+      if (wantSnapshot && hasMediumOrHigh) {
+        const isProUser = await apiClient.isPro();
+        if (isProUser) {
+          const backend = snapshots.detectBackend();
+          if (backend !== 'none') {
+            const snapSpin = ora({ text: `Creating ${backend} snapshot (restore point)...`, color: 'cyan' }).start();
+            const snap = await snapshots.create({ reason: 'pre-clean' });
+            snapSpin.stop();
+            if (snap.success) {
+              console.log(chalk.green(`  Snapshot created: ${snap.snapshot.id}`));
+              console.log(chalk.dim(`  Roll back with: aiclean restore --last`));
+            } else if (!snap.skipped) {
+              console.log(chalk.yellow(`  Snapshot failed (continuing): ${snap.reason}`));
+            }
+          }
+        }
       }
 
       // ── Execute clean ──
@@ -852,6 +884,650 @@ program
         console.log(chalk.dim('  Upgrade to Pro at https://aiclean.tech/pricing'));
       }
     }
+    console.log();
+  });
+
+// ━━━ RESTORE COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('restore')
+  .description('List or roll back a snapshot created before a clean')
+  .option('--list', 'List all snapshots')
+  .option('--last', 'Restore from the most recent snapshot')
+  .option('--id <id>', 'Restore a specific snapshot by id')
+  .option('--delete <id>', 'Delete a snapshot')
+  .option('--prune [keep]', 'Keep N most recent snapshots (default 5)')
+  .action(async (options) => {
+    await requirePro('rollback / snapshots (aiclean restore)');
+
+    if (options.list || (!options.last && !options.id && !options.delete && options.prune === undefined)) {
+      const list = await snapshots.list();
+      if (list.length === 0) {
+        console.log(chalk.yellow('\n  No snapshots yet.\n'));
+        console.log(chalk.dim('  Snapshots are created automatically before medium/high-risk cleans.'));
+        console.log();
+        return;
+      }
+      console.log();
+      console.log(chalk.bold.cyan('  Snapshots'));
+      console.log(chalk.gray('  ' + '\u2500'.repeat(50)));
+      for (const s of list) {
+        console.log(`  ${chalk.bold(s.id)} ${chalk.gray(s.backend)}`);
+        console.log(chalk.gray(`    ${new Date(s.timestamp).toLocaleString()}  \u2014  ${s.reason}`));
+      }
+      console.log();
+      return;
+    }
+
+    if (options.prune !== undefined) {
+      const keep = typeof options.prune === 'string' ? parseInt(options.prune, 10) || 5 : 5;
+      const r = await snapshots.prune(keep);
+      console.log(chalk.green(`\n  Kept ${r.kept}, removed ${r.removed.length}.\n`));
+      return;
+    }
+
+    if (options.delete) {
+      const r = await snapshots.remove(options.delete);
+      console.log();
+      console.log(r.success ? chalk.green(`  Removed ${options.delete}`) : chalk.red(`  ${r.reason}`));
+      console.log();
+      return;
+    }
+
+    let id = options.id;
+    if (options.last) {
+      const list = await snapshots.list();
+      if (list.length === 0) {
+        console.log(chalk.yellow('\n  No snapshots to restore.\n'));
+        return;
+      }
+      id = list[0].id;
+    }
+
+    console.log();
+    console.log(chalk.bold.yellow(`  About to restore snapshot: ${id}`));
+    console.log();
+
+    const { confirm } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirm',
+      message: chalk.yellow('This overwrites current state. Continue?'),
+      default: false,
+    }]);
+    if (!confirm) {
+      console.log(chalk.yellow('\n  Cancelled.\n'));
+      return;
+    }
+
+    const r = await snapshots.restore(id);
+    console.log();
+    if (r.success) {
+      console.log(chalk.green(`  ${r.message || 'Restored.'}`));
+    } else if (r.manual) {
+      console.log(chalk.yellow(r.message));
+    } else {
+      console.log(chalk.red(`  Restore failed: ${r.reason}`));
+    }
+    console.log();
+  });
+
+// ━━━ GUARD COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('guard')
+  .description('Pre-flight disk guardian for AI/dev-tool downloads')
+  .option('--install', 'Install shim wrappers for ollama, huggingface-cli, docker, pip, npm, cargo')
+  .option('--uninstall', 'Remove all shim wrappers')
+  .option('--status', 'Show current guard status')
+  .option('--orphans', 'Find and optionally clean orphaned partial downloads (free)')
+  .action(async (options) => {
+    // Orphan detection is free — everyone gets it.
+    if (options.orphans) {
+      console.log();
+      console.log(chalk.bold.cyan('  Scanning for orphaned partial downloads...'));
+      const ollama = await guardian.findOllamaOrphans();
+      const hf = await guardian.findHFOrphans();
+      const all = [...ollama, ...hf];
+      if (all.length === 0) {
+        console.log(chalk.green('  No orphans found.\n'));
+        return;
+      }
+      const total = all.reduce((s, o) => s + o.size, 0);
+      console.log();
+      for (const o of all) console.log(chalk.gray(`    ${formatSize(o.size).padStart(9)}  ${o.path}`));
+      console.log();
+      console.log(chalk.yellow(`  Total: ${formatSize(total)} in ${all.length} files`));
+
+      const { confirm } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirm',
+        message: 'Delete orphaned partial downloads?',
+        default: false,
+      }]);
+      if (confirm) {
+        const fsx = require('fs-extra');
+        for (const o of all) await fsx.remove(o.path).catch(() => {});
+        console.log(chalk.green(`\n  Removed ${all.length} orphans (${formatSize(total)}).\n`));
+      }
+      return;
+    }
+
+    if (options.status) {
+      const s = await guardian.guardStatus();
+      console.log();
+      console.log(chalk.bold.cyan('  Guard Status'));
+      console.log(chalk.gray('  ' + '\u2500'.repeat(40)));
+      if (!s.installed) {
+        console.log(chalk.dim('  Not installed. Run: aiclean guard --install'));
+        console.log();
+        return;
+      }
+      console.log(`  Installed at:  ${s.installedAt}`);
+      console.log(`  Shim count:    ${s.shimCount}`);
+      console.log(`  Shims dir:     ${s.shimsDir}`);
+      console.log(`  In PATH:       ${s.inPath ? chalk.green('yes') : chalk.yellow('no')}`);
+      if (s.pathHint) {
+        console.log();
+        console.log(chalk.yellow('  ' + s.pathHint));
+      }
+      console.log();
+      return;
+    }
+
+    if (options.uninstall) {
+      await requirePro('pre-flight disk guardian (aiclean guard)');
+      await guardian.uninstallShims();
+      console.log(chalk.green('\n  Guard shims uninstalled.\n'));
+      return;
+    }
+
+    if (options.install) {
+      await requirePro('pre-flight disk guardian (aiclean guard)');
+      console.log();
+      console.log(chalk.bold.cyan('  Installing guard shims...'));
+      const r = await guardian.installShims();
+      console.log();
+      for (const s of r.installed) console.log(chalk.green(`  \u2713 ${s.cmd}  \u2192  ${s.realPath}`));
+      for (const s of r.skipped) console.log(chalk.dim(`  \u2013 ${s.cmd} (${s.reason})`));
+      console.log();
+      console.log(chalk.yellow('  Next step: add the shims dir to the front of your PATH.'));
+      console.log(chalk.bold(`    export PATH="${r.shimsDir}:$PATH"`));
+      console.log();
+      return;
+    }
+
+    // No option — show help.
+    console.log();
+    console.log(chalk.bold('  aiclean guard') + chalk.dim(' \u2014 pre-flight disk guardian'));
+    console.log();
+    console.log('  --install    Install shim wrappers (Pro)');
+    console.log('  --uninstall  Remove shim wrappers (Pro)');
+    console.log('  --status     Show current status (free)');
+    console.log('  --orphans    Scan & clean orphaned partial downloads (free)');
+    console.log();
+  });
+
+// ━━━ GUARD INVOKE (internal — called by shim) ━━━━━━━━━━━━━━━━
+program
+  .command('guard-invoke')
+  .description('[internal] Called by guard shim scripts')
+  .option('--tool <name>', 'Tool name')
+  .option('--real <path>', 'Real binary path')
+  .allowUnknownOption()
+  .action(async (options, cmd) => {
+    const { spawn } = require('child_process');
+    const toolArgv = cmd.args || [];
+    const result = await guardian.invoke({ tool: options.tool, real: options.real, argv: toolArgv });
+
+    if (result.intercepted) {
+      const { check, estimate } = result;
+      console.log();
+      console.log(chalk.bold.yellow(`  aiclean guard: ${options.tool} wants ${formatSize(estimate)}, you have ${formatSize(check.freeBytes)} free.`));
+      console.log(chalk.yellow(`  Short by about ${formatSize(check.deficit)}. Run \`aiclean clean\` first?`));
+      console.log();
+      const { proceed } = await inquirer.prompt([{
+        type: 'list',
+        name: 'proceed',
+        message: 'What would you like to do?',
+        choices: [
+          { name: 'Clean first, then continue', value: 'clean' },
+          { name: 'Continue anyway', value: 'continue' },
+          { name: 'Cancel', value: 'cancel' },
+        ],
+      }]);
+      if (proceed === 'cancel') process.exit(1);
+      if (proceed === 'clean') {
+        const { execSync: es } = require('child_process');
+        try { es('aiclean clean --risk low --yes', { stdio: 'inherit' }); } catch { /* ignore */ }
+      }
+    }
+
+    // Exec the real binary transparently.
+    const child = spawn(options.real, toolArgv, { stdio: 'inherit' });
+    child.on('exit', (code) => process.exit(code == null ? 1 : code));
+  });
+
+// ━━━ DEDUPE COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('dedupe')
+  .description('Find duplicate ML model weights across Ollama / HuggingFace / LM Studio / torch.hub')
+  .option('--min-size <size>', 'Minimum file size to consider (e.g. 500MB, 1GB)', '100MB')
+  .option('--hardlink', 'Replace duplicates with hardlinks to reclaim space')
+  .option('--dry', 'Preview only')
+  .action(async (options) => {
+    await requirePro('duplicate model detection (aiclean dedupe)');
+
+    const minSize = parseDuration(options.minSize) || (require('../utils/size').parseSize(options.minSize)) || 100 * 1024 * 1024;
+    const spinner = ora({ text: 'Scanning model caches...', color: 'cyan' }).start();
+    let progress = { walked: 0, hashed: 0 };
+    const r = await dedupe.scan({
+      minSize,
+      onProgress: (p) => {
+        if (p.phase === 'walk') progress.walked = p.filesScanned;
+        if (p.phase === 'hash') progress.hashed = p.filesHashed;
+        spinner.text = `Scanning... ${progress.walked} files walked, ${progress.hashed} hashed`;
+      },
+    });
+    spinner.stop();
+
+    console.log();
+    console.log(chalk.bold.cyan('  Duplicate Models'));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(50)));
+    if (r.duplicates.length === 0) {
+      console.log(chalk.green('  No duplicates found.\n'));
+      return;
+    }
+
+    for (const group of r.duplicates) {
+      console.log();
+      console.log(chalk.bold(`  ${group.sizeFormatted} \u00d7 ${group.copies} copies \u2014 ${chalk.yellow(group.wasteFormatted)} reclaimable`));
+      for (const f of group.files) {
+        console.log(chalk.gray(`    [${f.rootName}] ${f.path}`));
+      }
+    }
+    console.log();
+    console.log(chalk.bold(`  Total reclaimable: ${chalk.green(r.totalWasteFormatted)} across ${r.groupCount} groups`));
+    console.log();
+
+    if (!options.hardlink) {
+      console.log(chalk.dim('  Run with --hardlink to replace duplicates with hardlinks.'));
+      console.log();
+      return;
+    }
+
+    const { confirm } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirm',
+      message: `Hardlink duplicates to reclaim ${r.totalWasteFormatted}?`,
+      default: false,
+    }]);
+    if (!confirm) {
+      console.log(chalk.yellow('\n  Cancelled.\n'));
+      return;
+    }
+
+    let linked = 0; let errored = 0; let reclaimed = 0;
+    for (const group of r.duplicates) {
+      const res = await dedupe.hardlinkGroup(group, { dryRun: options.dry });
+      for (const x of res) {
+        if (x.action === 'linked' || x.action === 'would-link') { linked++; reclaimed += x.size || 0; }
+        if (x.action === 'error') errored++;
+      }
+    }
+    console.log();
+    console.log(chalk.bold.green(`  ${options.dry ? 'Would link' : 'Linked'} ${linked} files \u2014 reclaimed ${formatSize(reclaimed)}`));
+    if (errored) console.log(chalk.yellow(`  ${errored} errors`));
+    console.log();
+  });
+
+// ━━━ PROJECTS COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('projects')
+  .description('Find project build artifacts (node_modules, target, .venv) grouped by git repo')
+  .option('--dormant <duration>', 'Only show repos with no git activity in this duration (e.g. 30d, 90d)')
+  .option('--root <paths>', 'Comma-separated project root dirs (default: ~/Projects, ~/Code, ~/dev, ...)')
+  .option('--clean', 'Clean selected artifacts interactively')
+  .action(async (options) => {
+    await requirePro('project-aware cleaning (aiclean projects)');
+
+    const roots = options.root ? options.root.split(',').map((p) => p.trim()) : undefined;
+    const spinner = ora({ text: 'Walking project directories...', color: 'cyan' }).start();
+    const r = await projects.scan({ roots, dormantDuration: options.dormant });
+    spinner.stop();
+
+    if (r.projects.length === 0) {
+      console.log(chalk.yellow('\n  No projects found.\n'));
+      console.log(chalk.dim('  Try: aiclean projects --root ~/my/projects,~/work'));
+      console.log();
+      return;
+    }
+
+    console.log();
+    console.log(chalk.bold.cyan('  Projects'));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(55)));
+
+    const toShow = options.dormant ? r.projects.filter((p) => p.dormant) : r.projects;
+    for (const p of toShow) {
+      const dormantTag = p.dormant ? chalk.red(' [dormant]') : '';
+      const age = p.daysSinceCommit != null ? chalk.gray(` (${p.daysSinceCommit}d since commit)`) : '';
+      console.log();
+      console.log(`  ${chalk.bold(p.repoRoot)}${dormantTag}${age}`);
+      console.log(chalk.gray(`    Total: ${chalk.yellow(p.totalSizeFormatted)}`));
+      for (const a of p.artifacts) {
+        console.log(chalk.gray(`      ${a.sizeFormatted.padStart(9)}  ${a.name.padEnd(18)} ${a.path}`));
+      }
+    }
+
+    console.log();
+    console.log(chalk.bold(`  Total reclaimable: ${chalk.green(r.totalReclaimableFormatted)} across ${toShow.length} projects`));
+    if (options.dormant) {
+      console.log(chalk.dim(`  Dormant: ${r.dormantTotalFormatted} across ${r.dormantCount} projects`));
+    }
+    console.log();
+
+    if (!options.clean) return;
+
+    const choices = toShow.flatMap((p) =>
+      p.artifacts.map((a) => ({ name: `${a.sizeFormatted.padStart(9)}  ${a.path}`, value: a.path, checked: p.dormant }))
+    );
+    const { selected } = await inquirer.prompt([{
+      type: 'checkbox',
+      name: 'selected',
+      message: 'Select artifacts to delete:',
+      pageSize: 25,
+      choices,
+    }]);
+    if (selected.length === 0) return;
+
+    const { confirm } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirm',
+      message: `Delete ${selected.length} artifacts?`,
+      default: false,
+    }]);
+    if (!confirm) return;
+
+    const results = await projects.cleanPaths(selected, { dryRun: false });
+    const reclaimed = results.reduce((s, x) => s + (x.size || 0), 0);
+    console.log();
+    console.log(chalk.bold.green(`  Reclaimed ${formatSize(reclaimed)}.`));
+    console.log();
+  });
+
+// ━━━ RULES COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('rules')
+  .description('Manage smart cleaning rules')
+  .option('--list', 'List configured rules')
+  .option('--add', 'Add a rule interactively')
+  .option('--remove <id>', 'Remove a rule by id')
+  .option('--test', 'Evaluate rules now against the current context')
+  .action(async (options) => {
+    await requirePro('smart rules engine (aiclean rules)');
+    const cfg = await configLoader.load();
+    const rulesArr = Array.isArray(cfg.rules) ? cfg.rules : [];
+
+    if (options.remove) {
+      const next = rulesArr.filter((r) => r.id !== options.remove);
+      await configLoader.set('rules', next);
+      console.log(chalk.green(`\n  Removed rule: ${options.remove}\n`));
+      return;
+    }
+
+    if (options.add) {
+      const ans = await inquirer.prompt([
+        { type: 'input', name: 'id', message: 'Rule id:' },
+        { type: 'input', name: 'when', message: 'When (JSON, e.g. {"disk.freePercent":"< 20"}):', default: '{}' },
+        { type: 'input', name: 'doo', message: 'Do (JSON, e.g. {"action":"clean","risk":"low"}):', default: '{"action":"clean","risk":"low"}' },
+      ]);
+      let whenObj, doObj;
+      try { whenObj = JSON.parse(ans.when); doObj = JSON.parse(ans.doo); }
+      catch (e) { console.log(chalk.red(`\n  Invalid JSON: ${e.message}\n`)); return; }
+      rulesArr.push({ id: ans.id, when: whenObj, do: doObj });
+      await configLoader.set('rules', rulesArr);
+      console.log(chalk.green(`\n  Added rule: ${ans.id}\n`));
+      return;
+    }
+
+    if (options.test) {
+      const ctx = await rules.buildContext({ scanResult: await engine.scan() });
+      const firing = rules.evaluate(rulesArr, ctx);
+      console.log();
+      console.log(chalk.bold.cyan('  Rule evaluation'));
+      console.log(chalk.gray('  ' + '\u2500'.repeat(40)));
+      console.log(`  Disk free: ${ctx.disk.freePercent.toFixed(1)}%`);
+      console.log(`  Time:      ${ctx.time.iso}`);
+      console.log(`  Power:     ${ctx.power.onBattery ? 'battery' : 'ac'}${ctx.power.batteryPercent != null ? ` (${ctx.power.batteryPercent}%)` : ''}`);
+      console.log();
+      console.log(chalk.bold(`  ${firing.length} of ${rulesArr.length} rules firing:`));
+      for (const r of firing) console.log(chalk.green(`    \u2713 ${r.id}`));
+      for (const r of rulesArr) if (!firing.includes(r)) console.log(chalk.dim(`    \u2013 ${r.id}`));
+      console.log();
+      return;
+    }
+
+    // Default: list
+    console.log();
+    console.log(chalk.bold.cyan('  Rules'));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(50)));
+    if (rulesArr.length === 0) {
+      console.log(chalk.dim('  No rules configured.'));
+      console.log(chalk.dim('  Add one: aiclean rules --add'));
+      console.log();
+      return;
+    }
+    for (const r of rulesArr) {
+      console.log();
+      console.log(`  ${chalk.bold(r.id)}`);
+      console.log(chalk.gray(`    when: ${JSON.stringify(r.when)}`));
+      console.log(chalk.gray(`    do:   ${JSON.stringify(r.do)}`));
+    }
+    console.log();
+  });
+
+// ━━━ DAEMON COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('daemon')
+  .description('Manage the aiclean background daemon (runs rules on a schedule)')
+  .argument('[action]', 'install | uninstall | status | tick', 'status')
+  .option('--interval <minutes>', 'Tick interval in minutes', '15')
+  .action(async (action, options) => {
+    if (action === 'tick') {
+      // Called by launchd/systemd — no user interaction.
+      const cfg = await configLoader.load();
+      const rulesArr = Array.isArray(cfg.rules) ? cfg.rules : [];
+      if (rulesArr.length === 0) return;
+      try {
+        const scanResult = await engine.scan();
+        const ctx = await rules.buildContext({ scanResult });
+        const firing = rules.evaluate(rulesArr, ctx);
+        // Fleet reporter heartbeat (if enrolled)
+        await reporter.heartbeat({ scanResult, diskInfo: ctx.disk }).catch(() => {});
+        const { execSync: es } = require('child_process');
+        for (const r of firing) {
+          if (r.do?.action === 'clean') {
+            const args = ['clean', '--yes'];
+            if (r.do.risk) { args.push('--risk', r.do.risk); }
+            if (r.do.only) { args.push('--only', r.do.only); }
+            try { es(`aiclean ${args.join(' ')}`, { stdio: 'pipe' }); } catch { /* ignore */ }
+          }
+        }
+      } catch { /* ignore */ }
+      return;
+    }
+
+    await requirePro('smart rules engine (aiclean daemon)');
+
+    if (action === 'install') {
+      const interval = parseInt(options.interval, 10) || 15;
+      const r = await rules.installDaemon({ intervalMinutes: interval });
+      console.log();
+      if (r.success) {
+        console.log(chalk.green(`  Daemon installed (${r.backend}) \u2014 tick every ${interval}m`));
+        console.log(chalk.dim(`  ${r.path}`));
+      } else {
+        console.log(chalk.red(`  Install failed: ${r.reason}`));
+      }
+      console.log();
+      return;
+    }
+
+    if (action === 'uninstall') {
+      const r = await rules.uninstallDaemon();
+      console.log(r.success ? chalk.green('\n  Daemon uninstalled.\n') : chalk.red(`\n  ${r.reason}\n`));
+      return;
+    }
+
+    // status
+    const s = await rules.daemonStatus();
+    console.log();
+    console.log(chalk.bold.cyan('  Daemon Status'));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(40)));
+    console.log(`  Installed:  ${s.installed ? chalk.green('yes') : chalk.dim('no')}`);
+    if (s.loaded !== undefined) console.log(`  Loaded:     ${s.loaded ? chalk.green('yes') : chalk.dim('no')}`);
+    if (s.active !== undefined) console.log(`  Active:     ${s.active ? chalk.green('yes') : chalk.dim('no')}`);
+    if (s.path) console.log(chalk.dim(`  Path:       ${s.path}`));
+    if (s.logPath) console.log(chalk.dim(`  Log:        ${s.logPath}`));
+    console.log();
+  });
+
+// ━━━ REGISTRY COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('registry')
+  .description('Manage the live signed adapter registry')
+  .argument('[action]', 'refresh | status | clear | verify', 'status')
+  .action(async (action) => {
+    if (action === 'refresh') {
+      await requirePro('live adapter registry (aiclean registry)');
+      const token = await apiClient.getToken();
+      const sp = ora({ text: 'Fetching signed manifest...', color: 'cyan' }).start();
+      const r = await registryFetch.refresh({ token });
+      sp.stop();
+      console.log();
+      if (r.success) {
+        console.log(chalk.green(`  Registry updated to v${r.version}`));
+        console.log(chalk.dim(`  ${r.definitionCount} definitions, ${r.advisoryCount} advisories`));
+      } else {
+        console.log(chalk.red(`  Refresh failed (${r.source}): ${r.reason}`));
+      }
+      console.log();
+      return;
+    }
+
+    if (action === 'clear') {
+      await registryFetch.clear();
+      console.log(chalk.green('\n  Registry cache cleared.\n'));
+      return;
+    }
+
+    // status
+    const s = await registryFetch.status();
+    console.log();
+    console.log(chalk.bold.cyan('  Registry Status'));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(40)));
+    if (!s.installed) {
+      console.log(chalk.dim('  No live registry installed.'));
+      console.log(chalk.dim('  Using baked-in definitions.'));
+      console.log();
+      console.log(chalk.dim('  Refresh with: aiclean registry refresh (Pro)'));
+    } else {
+      console.log(`  Version:       ${s.version}`);
+      console.log(`  Fetched:       ${new Date(s.fetchedAt).toLocaleString()} (${s.ageDays}d ago)`);
+      console.log(`  Definitions:   ${s.definitionCount}`);
+      console.log(`  Advisories:    ${s.advisoryCount}`);
+      console.log(`  Stale:         ${s.stale ? chalk.yellow('yes') : chalk.green('no')}`);
+    }
+    console.log();
+  });
+
+// ━━━ AGENT COMMAND (Pro/Team) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('agent')
+  .description('Enroll this machine with the fleet dashboard (Pro/Team)')
+  .argument('[action]', 'enroll | unenroll | status', 'status')
+  .option('--org-token <token>', 'Team org enrollment token')
+  .action(async (action, options) => {
+    if (action === 'enroll') {
+      await requirePro('fleet / team dashboard (aiclean agent)');
+      const sp = ora({ text: 'Enrolling device...', color: 'cyan' }).start();
+      const r = await reporter.enroll({ orgToken: options.orgToken });
+      sp.stop();
+      console.log();
+      if (r.success) {
+        console.log(chalk.green(`  Enrolled as device ${r.deviceId}`));
+        if (r.orgId) console.log(chalk.dim(`  Org: ${r.orgId}`));
+        console.log(chalk.dim('  Metrics will be reported on each daemon tick.'));
+      } else {
+        console.log(chalk.red(`  Enroll failed: ${r.reason}`));
+      }
+      console.log();
+      return;
+    }
+
+    if (action === 'unenroll') {
+      await reporter.unenroll();
+      console.log(chalk.green('\n  Device unenrolled.\n'));
+      return;
+    }
+
+    const s = await reporter.agentStatus();
+    console.log();
+    console.log(chalk.bold.cyan('  Agent Status'));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(40)));
+    if (!s.enrolled) {
+      console.log(chalk.dim('  Not enrolled.'));
+      console.log(chalk.dim('  Enroll with: aiclean agent enroll'));
+    } else {
+      console.log(`  Device id:  ${s.deviceId}`);
+      console.log(`  Enrolled:   ${new Date(s.enrolledAt).toLocaleString()}`);
+      if (s.orgId) console.log(`  Org:        ${s.orgId}`);
+    }
+    console.log();
+  });
+
+// ━━━ BENCHMARK COMMAND (Pro) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+program
+  .command('benchmark')
+  .alias('bench')
+  .description('Compare your usage against anonymized aggregates from other devs')
+  .action(async () => {
+    await requirePro('benchmarks (aiclean benchmark)');
+
+    const sp = ora({ text: 'Scanning + fetching benchmarks...', color: 'cyan' }).start();
+    const [scanResult, bench] = await Promise.all([
+      engine.scan(),
+      reporter.fetchBenchmarks(),
+    ]);
+    sp.stop();
+
+    if (!bench.success) {
+      console.log(chalk.red(`\n  Benchmark fetch failed: ${bench.reason}\n`));
+      return;
+    }
+
+    console.log();
+    console.log(chalk.bold.cyan('  You vs the fleet'));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(55)));
+    const nonEmpty = (scanResult.results || []).filter((r) => r.total > 0);
+    for (const r of nonEmpty) {
+      const b = bench.benchmarks[r.id];
+      if (!b || !b.n) continue;
+      const ratio = b.p50 > 0 ? r.total / b.p50 : 0;
+      let tag = chalk.green('normal');
+      if (ratio > 3) tag = chalk.red('outlier (3\u00d7 p50)');
+      else if (ratio > 1.5) tag = chalk.yellow('above p50');
+      else if (ratio < 0.5) tag = chalk.dim('below p50');
+      console.log(`  ${r.name.padEnd(22)} you=${formatSize(r.total).padStart(8)}  p50=${formatSize(b.p50).padStart(8)}  p90=${formatSize(b.p90).padStart(8)}  ${tag}`);
+    }
+    console.log();
+    console.log(chalk.dim('  Based on anonymized opt-in reports from aiclean users.'));
     console.log();
   });
 

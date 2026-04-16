@@ -1,0 +1,93 @@
+name: 'aiclean'
+description: 'Clean CI runner caches (Docker, npm, pip, cargo, HuggingFace, etc.) and report reclaimed space.'
+author: 'aiclean <hello@aiclean.tech>'
+branding:
+  icon: 'hard-drive'
+  color: 'purple'
+
+inputs:
+  risk:
+    description: 'Maximum risk level to clean: low | medium | high'
+    required: false
+    default: 'medium'
+  only:
+    description: 'Comma-separated tool IDs to clean (default: all). E.g. "docker,npm,huggingface".'
+    required: false
+  exclude:
+    description: 'Comma-separated tool IDs to skip.'
+    required: false
+  older-than:
+    description: 'Only clean files not accessed in the given duration (e.g. 30d, 2w, 6h). Requires Pro license.'
+    required: false
+  license-key:
+    description: 'aiclean Pro license key. Required to use older-than and live registry.'
+    required: false
+  license-email:
+    description: 'Email tied to the license.'
+    required: false
+  report:
+    description: 'If true, comment on the PR with reclaimed-bytes summary.'
+    required: false
+    default: 'true'
+  fail-on-error:
+    description: 'Fail the step if clean errors occurred.'
+    required: false
+    default: 'false'
+
+outputs:
+  reclaimed:
+    description: 'Bytes reclaimed by the clean step'
+    value: ${{ steps.run.outputs.reclaimed }}
+  reclaimed-human:
+    description: 'Human-readable reclaimed size (e.g. "12.4 GB")'
+    value: ${{ steps.run.outputs.reclaimed_human }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install aiclean
+      shell: bash
+      run: npm install -g aiclean
+
+    - name: Login (optional)
+      if: ${{ inputs.license-key != '' && inputs.license-email != '' }}
+      shell: bash
+      run: aiclean login --key "$AICLEAN_KEY" --email "$AICLEAN_EMAIL"
+      env:
+        AICLEAN_KEY: ${{ inputs.license-key }}
+        AICLEAN_EMAIL: ${{ inputs.license-email }}
+
+    - name: Scan + clean
+      id: run
+      shell: bash
+      run: |
+        set -o pipefail
+        args=(clean --yes --risk "${{ inputs.risk }}")
+        if [ -n "${{ inputs.only }}" ]; then args+=(--only "${{ inputs.only }}"); fi
+        if [ -n "${{ inputs.exclude }}" ]; then args+=(--exclude "${{ inputs.exclude }}"); fi
+        if [ -n "${{ inputs.older-than }}" ]; then args+=(--older-than "${{ inputs.older-than }}"); fi
+
+        echo "::group::aiclean run"
+        # Capture post-run JSON from aiclean stats
+        aiclean "${args[@]}" | tee /tmp/aiclean.out || status=$?
+        echo "::endgroup::"
+
+        reclaimed_line=$(grep -E "Total reclaimed:" /tmp/aiclean.out | tail -1 || true)
+        reclaimed_human=$(echo "$reclaimed_line" | sed -E 's/.*Total reclaimed: *//; s/ *$//')
+        echo "reclaimed_human=$reclaimed_human" >> "$GITHUB_OUTPUT"
+        echo "reclaimed=$reclaimed_human" >> "$GITHUB_OUTPUT"
+
+        if [ "${{ inputs.fail-on-error }}" = "true" ] && [ -n "${status:-}" ] && [ "$status" != "0" ]; then
+          exit "$status"
+        fi
+
+    - name: PR comment
+      if: ${{ inputs.report == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        human="${{ steps.run.outputs.reclaimed_human }}"
+        if [ -z "$human" ]; then human="0 B"; fi
+        body="### aiclean runner cleanup\n\nReclaimed **$human** of cache/artifact disk on this runner.\n\n_Powered by [aiclean](https://aiclean.tech)._"
+        gh pr comment "${{ github.event.pull_request.number }}" --body "$(printf '%b' "$body")" || true
